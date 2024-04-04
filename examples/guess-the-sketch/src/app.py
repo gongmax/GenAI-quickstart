@@ -47,8 +47,12 @@ player_prompt = {}
 # The nested dictionary to store the guesses and pictures for each round of each player
 # The outer dictionary is indexed by the player id, and the inner dictionary is indexed by the round number
 player_guess = {}
-# The set to store the players who have clicked the "New Game" button
+# The set to store the players who have clicked the "New Game" button or disconnected for more than 30 seconds
 dropped_players = set()
+# The set to store the players who was assigned to the gameserver
+connected_players = set()
+# The set to store the assigned players who were disconnected
+disconnected_players = set()
 
 logging.basicConfig(level=logging.INFO)  # Set to logging.DEBUG for more verbose logs 
 logger = logging.getLogger(__name__)  # Get a logger for your application
@@ -58,32 +62,32 @@ headers = {"Content-Type": "application/json"}
 logger.debug('gameserver started')
 logger.debug('Agones SDK port: %s', PORT)
 
-body = Agones.SdkEmpty() # SdkEmpty
-agones = Agones.SDKApi(Agones.ApiClient(conf))
-agones.health(body)
+# body = Agones.SdkEmpty() # SdkEmpty
+# agones = Agones.SDKApi(Agones.ApiClient(conf))
+# agones.health(body)
 
-# Retry connection to Agones SDK for 5 times if it fails
-retry = 5
-while retry != 0:
-    try:
-        retry = retry - 1
-        agones.ready(body)
-        break
-    except:
-        time.sleep(2)
-        logger.debug('retry connection')
+# # Retry connection to Agones SDK for 5 times if it fails
+# retry = 5
+# while retry != 0:
+#     try:
+#         retry = retry - 1
+#         agones.ready(body)
+#         break
+#     except:
+#         time.sleep(2)
+#         logger.debug('retry connection')
 
-def agones_health():
-    while True:
-        try:
-            api_response = agones.health(body)
-            logger.debug('health check reponse: %s', api_response)
-            time.sleep(2)
-        except ApiException as exc:
-            logger.error('health check failed: %s', exc)
+# def agones_health():
+#     while True:
+#         try:
+#             api_response = agones.health(body)
+#             logger.debug('health check reponse: %s', api_response)
+#             time.sleep(2)
+#         except ApiException as exc:
+#             logger.error('health check failed: %s', exc)
 
-health_thread = threading.Thread(target=agones_health)
-health_thread.start()
+# health_thread = threading.Thread(target=agones_health)
+# health_thread.start()
 
 @app.route('/')
 def index():
@@ -94,6 +98,51 @@ def index():
 game_round = 3
 embedding_endpoint = 'http://embeddings-api'
 
+@socketio.on('connect')
+def handle_connect():
+    player_id = request.sid
+    logger.info('Player %s ask for connected', player_id)
+    if player_id in connected_players:
+        # A known player reconnected 
+        disconnected_players.discard(player_id)
+    else:
+        # New player
+        if len(connected_players) == 2:
+            logger.info("too many players on this server, redirecting to frontend %s", frontend_url)
+            emit('frontend_url', {'frontendURL': frontend_url}, room=player_id)
+        else:
+            logger.info('Player %s added into connected_players', player_id)
+            connected_players.add(player_id)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    player_id = request.sid
+    logger.info('Player %s disconnected', player_id)
+    if player_id in connected_players:
+        # We know this player, add it to disconnected_player set for future check
+        disconnected_players.add(player_id)
+        check_connection_thread = threading.Thread(target=check_connection, args=(player_id,))
+        logger.info('Starting check_connection_thread for player %s', player_id)
+        check_connection_thread.start()
+
+def check_connection(player_id):
+    logger.info('Checking connection for player %s', player_id)
+    start_time = time.time()  # Get the current time
+    end_time = start_time + 30  # Calculate 30 seconds into the future
+    while time.time() < end_time:
+        if player_id not in disconnected_players:
+            # player reconnected, return
+            logger.info('Player %s reconnected', player_id)
+            return
+        time.sleep(1)
+    # player did not reconnect within 30s, add it into dropped_player set
+    dropped_players.add(player_id)
+    if len(dropped_players) == 2:
+        logger.info('Both players have dropped, shutdown the gameserver')
+        # Both players have dropped, shutdown the gameserver
+        # agones.shutdown(body)
+
+
 # When player click "New Game" button
 @socketio.on('playAgain')
 def handle_message(data):
@@ -101,9 +150,10 @@ def handle_message(data):
     logger.debug('Received playAgain from player %s', player_id)
     dropped_players.add(player_id)
     emit('frontend_url', {'frontendURL': frontend_url}, room=player_id)
-    # If both players have clicked the "New Game" button, shutdown the gameserver
+    # If both players have dropped, shutdown the gameserver
     if len(dropped_players) == 2:
-        agones.shutdown(body)
+        # agones.shutdown(body)
+        pass
 
 # When player submit the guess
 @socketio.on('guess')

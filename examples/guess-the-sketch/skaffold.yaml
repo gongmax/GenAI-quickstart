@@ -25,6 +25,6 @@ build:
     context: .
 manifests:
   rawYaml:
-  - ./fleet.yaml
+  - ./k8s.yaml
 deploy:
   kubectl:
